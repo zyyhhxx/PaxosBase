@@ -5,8 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
+	"time"
 
 	"github.com/kataras/iris"
 	"github.com/kataras/iris/middleware/logger"
@@ -15,8 +15,9 @@ import (
 
 //Data structure for the data
 type Homework struct {
-	Name string
-	Desc string
+	Name        string
+	Desc        string
+	Submissions int
 }
 
 type FrontendMessage struct {
@@ -27,9 +28,14 @@ type FrontendMessage struct {
 
 type BackendMessage struct {
 	Success    bool
-	Homeworks  []Homework
+	Homeworks  []HomeworkStore
 	ErrMessage string
 	Homework   Homework
+}
+
+type HomeworkStore struct {
+	Homework Homework
+	Deleted  bool
 }
 
 var backend = ""
@@ -63,8 +69,26 @@ func main() {
 	app.Get("/create_form", handleCreateForm)
 	app.Get("/delete", handleDelete)
 
+	go ping()
+
 	//Run the server
 	app.Run(iris.Addr(":" + strconv.Itoa(port)))
+}
+
+/*
+This function keeps pinging the backend server and report a failure if it does not get a response
+Input: none
+Output: none
+*/
+func ping() {
+	//Pingack
+	for {
+		response := sendToBackend(FrontendMessage{Operation: "ping"})
+		if !response.Success {
+			fmt.Println("Detected failure on " + backend + " at " + time.Now().UTC().String())
+		}
+		time.Sleep(10 * time.Second)
+	}
 }
 
 /*
@@ -76,18 +100,21 @@ func handleHome(ctx iris.Context) {
 
 	response := sendToBackend(FrontendMessage{Operation: "home"})
 	if !response.Success {
-		ctx.HTML("<h1>Error loading the home page</h1>")
+		ctx.HTML("<h1>Error loading the home page: " + response.ErrMessage + "</h1>")
 	}
 
 	homeworks := response.Homeworks
 
 	ctx.HTML("<h1>List of homeworks</h1>")
+	ctx.HTML("<h1>Total number of homeworks: " + strconv.Itoa(len(homeworks)) + "</h1>")
 	if len(homeworks) > 0 {
 		ctx.HTML("<table>")
-		ctx.HTML("<tr><th>Homework</th><th>Description</th></tr>")
+		ctx.HTML("<tr><th>Homework</th><th>Description</th><th>Submissions</th></tr>")
 		for index, element := range homeworks {
-			ctx.HTML("<tr><td> <a href=\"/edit?id=" + strconv.Itoa(index) +
-				"\">" + element.Name + "</a></td><td>" + element.Desc + "</th></td>")
+			if !element.Deleted {
+				ctx.HTML("<tr><td> <a href=\"/edit?id=" + strconv.Itoa(index) +
+					"\">" + element.Homework.Name + "</a></td><td>" + element.Homework.Desc + "</td><td>" + strconv.Itoa(element.Homework.Submissions) + "</td></tr>")
+			}
 		}
 		ctx.HTML("</table>")
 	} else {
@@ -106,7 +133,7 @@ func handleEdit(ctx iris.Context) {
 
 	response := sendToBackend(FrontendMessage{Operation: "getOne", ID: id})
 	if !response.Success {
-		ctx.HTML("<h1>Error getting the specified entry</h1>")
+		ctx.HTML("<h1>Error getting the specified entry: " + response.ErrMessage + "</h1>")
 	}
 	homework := response.Homework
 
@@ -131,9 +158,9 @@ func handleEditForm(ctx iris.Context) {
 	name := ctx.FormValue("itemName")
 	desc := ctx.FormValue("desc")
 
-	response := sendToBackend(FrontendMessage{Operation: "edit", ID: id, NewHomework: Homework{name, desc}})
+	response := sendToBackend(FrontendMessage{Operation: "edit", ID: id, NewHomework: Homework{Name: name, Desc: desc}})
 	if !response.Success {
-		ctx.HTML("<h1>Error editting the specified entry</h1>")
+		ctx.HTML("<h1>Error editing the specified entry: " + response.ErrMessage + "</h1>")
 	} else {
 		ctx.HTML("<h1>Homework Updated!</h1>")
 	}
@@ -163,9 +190,9 @@ func handleCreateForm(ctx iris.Context) {
 	name := ctx.FormValue("itemName")
 	desc := ctx.FormValue("desc")
 
-	response := sendToBackend(FrontendMessage{Operation: "create", NewHomework: Homework{name, desc}})
+	response := sendToBackend(FrontendMessage{Operation: "create", NewHomework: Homework{name, desc, 0}})
 	if !response.Success {
-		ctx.HTML("<h1>Error creating a new entry</h1>")
+		ctx.HTML("<h1>Error creating a new entry: " + response.ErrMessage + "</h1>")
 	} else {
 		ctx.HTML("<h1>Homework Created!</h1>")
 	}
@@ -183,7 +210,7 @@ func handleDelete(ctx iris.Context) {
 
 	response := sendToBackend(FrontendMessage{Operation: "delete", ID: id})
 	if !response.Success {
-		ctx.HTML("<h1>Error deleting the specified entry</h1>")
+		ctx.HTML("<h1>Error deleting the specified entry: " + response.ErrMessage + "</h1>")
 	} else {
 		ctx.HTML("<h1>Homework Deleted!</h1>")
 	}
@@ -200,7 +227,7 @@ func sendToBackend(message FrontendMessage) BackendMessage {
 	//Attempt to connect to the backend server
 	conn, err := net.Dial("tcp", backend)
 	if err != nil {
-		fmt.Fprint(os.Stderr, "could not connect: ", err.Error())
+		return BackendMessage{Success: false, ErrMessage: err.Error()}
 	}
 	defer conn.Close()
 
@@ -208,14 +235,19 @@ func sendToBackend(message FrontendMessage) BackendMessage {
 	mes, _ := json.Marshal(message)
 	conn.Write(mes)
 
+	//Set up a timeout
+	timeoutDuration := 5 * time.Second
+	conn.SetReadDeadline(time.Now().Add(timeoutDuration))
+
 	//Receive and return the response
-	buf := make([]byte, 1024)
+	buf := make([]byte, 1024*1024) //1MB buffer
 	reqLen, bufErr := conn.Read(buf)
 	if bufErr != nil {
-		fmt.Println("Error reading:", err.Error())
+		fmt.Println("Error reading:", bufErr.Error())
+		return BackendMessage{Success: false, ErrMessage: bufErr.Error()}
 	}
 	response := BackendMessage{}
 	json.Unmarshal(buf[:reqLen], &response)
-	fmt.Println("Message received:" + string(buf))
+	//fmt.Println("Message received:" + string(buf))
 	return response
 }
