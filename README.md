@@ -1,5 +1,5 @@
 # PaxosBase
-PaxosBase is a distributed database system in GoLang following the Paxos protocol. 
+PaxosBase is a scalable distributed database system which supports CRUD operations and hosts a distributed database coordinated by Paxos protocol, allowing a large number of users to create, read, update and delete items in the database. PaxosBase features a frontend built by HTML and a backend built by Go
 
 ## How to build: 
 `go run frontend.go (optional) --listen (custom port number) (optional) --backend (custom address of the backend server)`  
